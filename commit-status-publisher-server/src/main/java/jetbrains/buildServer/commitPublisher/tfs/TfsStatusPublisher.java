@@ -35,6 +35,7 @@ class TfsStatusPublisher extends HttpBasedCommitStatusPublisher {
   private static final String COMMITS_URL_FORMAT = "{0}/{1}/_apis/git/repositories/{2}/commits?api-version=1.0&$top=1";
   private static final String COMMIT_URL_FORMAT = "{0}/{1}/_apis/git/repositories/{2}/commits/{3}?api-version=1.0";
   private static final String COMMIT_STATUS_URL_FORMAT = "{0}/{1}/_apis/git/repositories/{2}/commits/{3}/statuses?api-version=2.1";
+  private static final String PULL_REQUEST_BY_SOURCE_REF_URL_FORMAT = "{0}/{1}/_apis/git/repositories/{2}/pullRequests?api-version=3.0&status=active&sourceRefName={3}";
   private static final String PULL_REQUEST_ITERATIONS_URL_FORMAT = "{0}/{1}/_apis/git/repositories/{2}/pullRequests/{3}/iterations?api-version=3.0";
   private static final String PULL_REQUEST_ITERATION_STATUS_URL_FORMAT = "{0}/{1}/_apis/git/repositories/{2}/pullRequests/{3}/iterations/{4}/statuses?api-version=4.0-preview";
   private static final String ERROR_AUTHORIZATION = "Check access token value and verify that it has Code (status) and Code (read) scopes";
@@ -44,7 +45,6 @@ class TfsStatusPublisher extends HttpBasedCommitStatusPublisher {
 
   // Captures pull request identifier. Example: refs/pull/1/merge
   private static final Pattern TFS_GIT_PULL_REQUEST_PATTERN = Pattern.compile("^refs\\/pull\\/(\\d+)");
-
 
   TfsStatusPublisher(@NotNull final CommitStatusPublisherSettings settings,
                      @NotNull final SBuildType buildType,
@@ -160,6 +160,34 @@ class TfsStatusPublisher extends HttpBasedCommitStatusPublisher {
     }
 
     return commitId[0];
+  }
+
+  @Nullable
+  private static String getPullRequestBySourceRefName(@NotNull final TfsRepositoryInfo info,
+                                                      @NotNull final String sourceRefName,
+                                                      @NotNull final Map<String, String> params) throws PublisherException {
+
+    final String url = MessageFormat.format(PULL_REQUEST_BY_SOURCE_REF_URL_FORMAT, info.getServer(), info.getProject(), info.getRepository(), sourceRefName);
+    final String[] pullRequestId = {null};
+
+    try {
+      HttpHelper.get(url, StringUtil.EMPTY, params.get(TfsConstants.ACCESS_TOKEN),
+        Collections.singletonMap("Accept", "application/json"), BaseCommitStatusPublisher.DEFAULT_CONNECTION_TIMEOUT, new DefaultHttpResponseProcessor() {
+          @Override
+          public void processResponse(HttpResponse response) throws HttpPublisherException, IOException {
+            PullRequestsList pullRequests = processGetResponse(response, PullRequestsList.class);
+            if (pullRequests == null || pullRequests.value == null || pullRequests.value.size() == 0) {
+              // Nothing found, that's fine, will return null.
+            } else {
+              pullRequestId[0] = pullRequests.value.get(0).pullRequestId;
+            }
+          }
+        });
+    } catch (Exception e) {
+      throw new PublisherException(FAILED_TO_TEST_CONNECTION_TO_REPOSITORY + info, e);
+    }
+
+    return pullRequestId[0];
   }
 
   @NotNull
@@ -314,16 +342,27 @@ class TfsStatusPublisher extends HttpBasedCommitStatusPublisher {
       return;
     }
 
+    String pullRequestId = null;
+    List<String> commits = null;
+
     final Matcher matcher = TFS_GIT_PULL_REQUEST_PATTERN.matcher(branch);
-    if (!matcher.find()) {
-      LOG.debug(String.format("Branch %s for commit %s does not contain info about pull request, status would not be published", branch, commitId));
-      return;
+    if (matcher.find()) {
+      pullRequestId = matcher.group(1);
+
+      // Since it's a pull refs, a merged commit will be used to build, we need to get parent commit for it
+      commits = getParentCommits(info, commitId, myParams);
+    } else {
+      LOG.debug(String.format("Branch %s for commit %s does not contain info about pull request, trying to get pull request by sourcerefname", branch, commitId));
+
+      pullRequestId = getPullRequestBySourceRefName(info, branch, myParams);
+      if (pullRequestId == null) {
+        LOG.debug(String.format("Branch %s does not have a pull request, status would not be published", branch));
+        return;
+      }
+
+      commits = new ArrayList<String>();
+      commits.add(commitId);
     }
-
-    final String pullRequestId = matcher.group(1);
-
-    // Since it's a merge request we need to get parent commit for it
-    final List<String> commits = getParentCommits(info, commitId, myParams);
 
     // Then we need to get pull request iteration where this commit present
     final String iterationId = getPullRequestIteration(info, pullRequestId, commits, myParams);
@@ -381,6 +420,14 @@ class TfsStatusPublisher extends HttpBasedCommitStatusPublisher {
     }
 
     return info;
+  }
+
+  private static class PullRequestsList {
+    private List<PullRequest> value;
+  }
+
+  private static class PullRequest {
+    private String pullRequestId; 
   }
 
   private static class Error {
