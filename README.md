@@ -1,3 +1,5 @@
+[!IMPORTANT] This repository has been archived and is no longer actively maintained. No further updates or support are planned.
+
 # Teamcity Commit Status Publisher
 [![official JetBrains project](http://jb.gg/badges/official-plastic.svg)](https://confluence.jetbrains.com/display/ALL/JetBrains+on+GitHub)
 
